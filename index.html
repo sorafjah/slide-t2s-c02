@@ -104,6 +104,23 @@
                   <span id="delete-slide-link" class="text-xs text-red-500 hover:underline cursor-pointer">このスライドを完全に削除</span>
                 </div>
               </div>
+
+              <!-- デッキ全体：閲覧モード文字サイズ -->
+              <div class="mt-6 border-t pt-6">
+                <label class="block text-lg font-semibold mb-2">閲覧モードの文字サイズ（デッキ全体）</label>
+                <div class="flex flex-wrap gap-2 mb-3" id="viewer-cpl-presets">
+                  <button data-cpl="32" class="px-3 py-1 text-sm border rounded">小さめ</button>
+                  <button data-cpl="25" class="px-3 py-1 text-sm border rounded font-semibold bg-indigo-50 text-indigo-700">標準</button>
+                  <button data-cpl="20" class="px-3 py-1 text-sm border rounded">大きめ</button>
+                  <button data-cpl="16" class="px-3 py-1 text-sm border rounded">特大</button>
+                </div>
+                <div class="flex items-center gap-3">
+                  <!-- 上限を35に変更 -->
+                  <input id="viewer-cpl-range" type="range" min="15" max="35" step="1" value="25" class="w-full">
+                  <span class="text-sm text-gray-600">基準<span id="viewer-cpl-label">25</span>文字/行</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-2">※ “基準文字数/行（CPL）” を下げるほど文字が大きく表示されます。</p>
+              </div>
             </div>
 
             <!-- 右：プレビューと編集 -->
@@ -139,7 +156,19 @@
                   <input type="text" id="image-url-input" class="mt-1 w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500" placeholder="空欄でもOKです">
                 </div>
 
-                <!-- 並べ替え（削除ボタン追加） -->
+                <!-- このスライドだけ：文字サイズ（▲▼に変更 & 動作入替） -->
+                <div class="pt-2">
+                  <label class="block text-sm font-semibold text-gray-700 mb-1">このスライドだけの文字サイズ（閲覧モード）</label>
+                  <div class="flex items-center gap-2">
+                    <button id="slide-cpl-up" class="px-2 py-1 text-xs border rounded">▲</button>
+                    <button id="slide-cpl-down" class="px-2 py-1 text-xs border rounded">▼</button>
+                    <button id="slide-cpl-reset" class="px-2 py-1 text-xs border rounded text-indigo-700">リセット</button>
+                    <span class="text-xs text-gray-600">現在：<span id="slide-cpl-display">—</span> 文字/行（デッキ基準 <span id="deck-cpl-inline">25</span>）</span>
+                  </div>
+                  <p class="text-[11px] text-gray-500 mt-1">※ **▲で文字を大きく（CPLを小さく）**、**▼で文字を小さく（CPLを大きく）**。範囲 15〜35。</p>
+                </div>
+
+                <!-- 並べ替え -->
                 <div class="pt-4">
                   <h3 class="text-sm font-semibold text-gray-700 mb-2">スライドの順番を変更（ドラッグ & ドロップ／▲▼）</h3>
                   <ul id="reorder-list" class="divide-y divide-gray-200 rounded-lg border border-gray-200 overflow-hidden">
@@ -192,11 +221,15 @@
 
     let app, db, auth;
     let SLIDES_COLLECTION_PATH;
+    // 上限を35に
+    const CPL_MIN = 15, CPL_MAX = 35;
+
     const state = {
       mode:'editor',
       userId:null,
       editor:{slides:[],currentSlideIndex:-1,slideName:'',loadedDocId:null},
-      viewer:{slides:[],currentSlideIndex:-1,slideName:''}
+      viewer:{slides:[],currentSlideIndex:-1,slideName:''},
+      viewerSettings:{ cpl:25, minPx:18, maxPx:56 } // デッキ基準
     };
 
     const dom = {
@@ -234,6 +267,18 @@
       viewerBackBtn:document.getElementById('viewer-back-btn'),
       reorderList:document.getElementById('reorder-list'),
       addSlideBtn:document.getElementById('add-slide-btn'),
+
+      // Deck-level CPL controls
+      viewerCplRange: document.getElementById('viewer-cpl-range'),
+      viewerCplLabel: document.getElementById('viewer-cpl-label'),
+      viewerCplPresets: document.getElementById('viewer-cpl-presets'),
+
+      // Per-slide CPL controls（▲▼に合わせてIDはそのまま）
+      slideCplUp: document.getElementById('slide-cpl-up'),     // ▲（大きく）
+      slideCplDown: document.getElementById('slide-cpl-down'), // ▼（小さく）
+      slideCplReset: document.getElementById('slide-cpl-reset'),
+      slideCplDisplay: document.getElementById('slide-cpl-display'),
+      deckCplInline: document.getElementById('deck-cpl-inline'),
     };
 
     function showNotification(message,type='info',duration=3000){
@@ -320,9 +365,7 @@
     function createSlideHTML(slide,isViewer=false){
       const hasImage=slide.image_url && slide.image_url.trim()!=='';
       const textHTML=(slide.text_content||'').replace(/\n/g,'<br>');
-
       if(isViewer){
-        // 閲覧モード：本文は自動サイズ調整（約25文字/行）
         if(hasImage){
           return `
             <div class="w-full h-full flex flex-col justify-between bg-white rounded-xl overflow-hidden">
@@ -344,7 +387,6 @@
           `;
         }
       }else{
-        // 編集プレビュー（従来の1.5倍スケール）
         if(hasImage){
           return `
             <div class="w-full h-full flex flex-col justify-between bg-gray-50 rounded-lg overflow-hidden">
@@ -367,9 +409,17 @@
       }
     }
 
+    // 現在スライドの有効CPL（スライドcpl優先→デッキcpl）
+    function getEffectiveCpl(slide){
+      const deck = state.viewerSettings?.cpl ?? 25;
+      const ov = (slide && typeof slide.cpl==='number') ? slide.cpl : null;
+      return (ov??deck);
+    }
+
     function renderEditor(){
       const {slides,currentSlideIndex,slideName,loadedDocId}=state.editor;
       dom.slideNameInput.value=slideName;
+      dom.deckCplInline.textContent = state.viewerSettings.cpl;
 
       if(slides.length===0||currentSlideIndex===-1){
         dom.editorSlideContainer.innerHTML=`<p class="text-gray-500">スライドがありません。JSONをインポートするか、新しいスライドを追加してください。</p>`;
@@ -380,6 +430,8 @@
         document.getElementById('slide-edit-form').classList.remove('hidden');
         dom.textContentInput.value=slide.text_content||'';
         dom.imageUrlInput.value=slide.image_url||'';
+        const disp = (typeof slide.cpl==='number') ? `${slide.cpl}（上書き）` : `${getEffectiveCpl(slide)}（有効）`;
+        dom.slideCplDisplay.textContent = disp;
       }
       dom.deleteSlideContainer.classList.toggle('hidden',!loadedDocId);
       renderReorderList();
@@ -395,11 +447,11 @@
         dom.viewerSlideScreen.classList.remove('hidden');
         const slide=slides[currentSlideIndex];
         dom.viewerSlideContainer.innerHTML=createSlideHTML(slide,true);
-        autoSizeViewerText();              // 初回調整
+        autoSizeViewerText(); // 初回調整
       }
     }
 
-    // 並べ替えUI（削除ボタンを追加）
+    // 並べ替えUI（削除 & 「移動」に変更）
     function renderReorderList(){
       const {slides,currentSlideIndex}=state.editor;
       const ul=dom.reorderList; ul.innerHTML='';
@@ -421,7 +473,7 @@
         btns.innerHTML=`
           <button class="btn-up text-gray-600 hover:text-gray-800 px-2 py-1 text-xs border border-gray-200 rounded">▲</button>
           <button class="btn-down text-gray-600 hover:text-gray-800 px-2 py-1 text-xs border border-gray-200 rounded">▼</button>
-          <button class="btn-jump text-gray-600 hover:text-gray-800 px-2 py-1 text-xs border border-gray-200 rounded">移動...</button>
+          <button class="btn-jump text-gray-600 hover:text-gray-800 px-2 py-1 text-xs border border-gray-200 rounded">移動</button>
           <button class="btn-delete text-red-600 hover:text-red-800 px-2 py-1 text-xs border border-red-200 rounded">削除</button>
         `;
 
@@ -490,17 +542,19 @@
 
     // ====== テキスト自動サイズ（閲覧モード）======
     function autoSizeViewerText(){
-      // コンテナ幅 / 25 でフォントサイズを決定（18px〜56pxの範囲）
       const p = dom.viewerSlideContainer.querySelector('.auto-size-text');
       if(!p) return;
       const container = p.parentElement || dom.viewerSlideContainer;
       const w = (container.clientWidth || 800);
-      const size = Math.max(18, Math.min(56, Math.floor(w/25)));
+      const slide = state.viewer.slides[state.viewer.currentSlideIndex] || {};
+      const cpl = getEffectiveCpl(slide);
+      const size = Math.max(state.viewerSettings.minPx,
+        Math.min(state.viewerSettings.maxPx, Math.floor(w / cpl)));
       p.style.fontSize = size + 'px';
     }
     window.addEventListener('resize',()=>{ if(!dom.viewerView.classList.contains('hidden')) autoSizeViewerText(); });
 
-    // --------- データ入出力など（既存） ---------
+    // --------- 入出力など ---------
     function handleModeChange(newMode){state.mode=newMode; render()}
     function handleImportJson(){
       try{
@@ -512,7 +566,8 @@
         state.editor.slides=slidesData.map(s=>{
           const text=s.text_content||s.text||s.content||s.文章||s.テキスト||"";
           const image=s.image_url||s.imageUrl||s.image||s.画像URL||s.画像||"";
-          return {text_content:String(text),image_url:String(image)};
+          const cpl = (typeof s.cpl==='number') ? s.cpl : undefined;
+          return {text_content:String(text),image_url:String(image), ...(typeof cpl==='number'?{cpl}:{} )};
         });
         state.editor.currentSlideIndex=state.editor.slides.length>0?0:-1;
         state.editor.slideName=''; state.editor.loadedDocId=null;
@@ -553,6 +608,7 @@
         slideName,
         slides:state.editor.slides,
         authorId:state.userId,
+        viewerSettings: state.viewerSettings, // 設定も保存
         updatedAt:new Date().toISOString(),
       };
 
@@ -593,10 +649,19 @@
         const slideDoc=await findSlidesByName(slideName);
         if(slideDoc){
           const data=slideDoc.data();
-          state.editor.slides=data.slides||[];
+          state.editor.slides=(data.slides||[]).map(s=>({
+            text_content:s.text_content||"",
+            image_url:s.image_url||"",
+            ...(typeof s.cpl==='number'?{cpl:s.cpl}:{})
+          }));
           state.editor.currentSlideIndex=data.slides.length>0?0:-1;
           state.editor.slideName=data.slideName;
           state.editor.loadedDocId=slideDoc.id;
+
+          // デッキ設定も同期
+          state.viewerSettings = data.viewerSettings || { cpl:25, minPx:18, maxPx:56 };
+          syncDeckCplUI(state.viewerSettings.cpl);
+
           dom.jsonInput.value='';
           showNotification(`スライド「${data.slideName}」をロードしました。`,'success');
         }else{
@@ -636,9 +701,14 @@
         const slideDoc=await findSlidesByName(slideName);
         if(slideDoc){
           const data=slideDoc.data();
-          state.viewer.slides=data.slides||[];
+          state.viewer.slides=(data.slides||[]).map(s=>({
+            text_content:s.text_content||"",
+            image_url:s.image_url||"",
+            ...(typeof s.cpl==='number'?{cpl:s.cpl}:{})
+          }));
           state.viewer.currentSlideIndex=data.slides.length>0?0:-1;
           state.viewer.slideName=data.slideName;
+          state.viewerSettings = data.viewerSettings || { cpl:25, minPx:18, maxPx:56 };
         }else{
           showNotification(`スライド「${slideName}」が見つかりませんでした。`,'error');
           state.viewer.slides=[];
@@ -662,6 +732,57 @@
       dom.viewerSlideNameInput.value=''; renderViewer();
     }
 
+    // ---------- Deck-level CPL UI ----------
+    function syncDeckCplUI(cpl){
+      state.viewerSettings.cpl = clamp(cpl, CPL_MIN, CPL_MAX);
+      dom.viewerCplRange.value = String(state.viewerSettings.cpl);
+      dom.viewerCplLabel.textContent = String(state.viewerSettings.cpl);
+      dom.deckCplInline.textContent = state.viewerSettings.cpl;
+      if(!dom.viewerView.classList.contains('hidden')) autoSizeViewerText();
+      renderEditor(); // 右側の「現在」表示も更新
+    }
+    function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+
+    function setupViewerSizeControls(){
+      dom.viewerCplPresets?.addEventListener('click',(e)=>{
+        const btn = e.target.closest('button[data-cpl]');
+        if(!btn) return;
+        [...dom.viewerCplPresets.querySelectorAll('button')].forEach(b=>{
+          b.classList.remove('bg-indigo-50','text-indigo-700','font-semibold');
+        });
+        btn.classList.add('bg-indigo-50','text-indigo-700','font-semibold');
+        syncDeckCplUI(Number(btn.dataset.cpl));
+      });
+      dom.viewerCplRange?.addEventListener('input',()=>{
+        const v = Number(dom.viewerCplRange.value);
+        syncDeckCplUI(v);
+      });
+    }
+
+    // ---------- Per-slide CPL UI ----------
+    function setupPerSlideSizeControls(){
+      // ▲ = 大きく（CPL-1）
+      dom.slideCplUp.addEventListener('click',()=>{
+        const i = state.editor.currentSlideIndex; if(i<0) return;
+        const s = state.editor.slides[i]; const base = getEffectiveCpl(s);
+        s.cpl = clamp((typeof s.cpl==='number'? s.cpl : base) - 1, CPL_MIN, CPL_MAX);
+        renderEditor();
+      });
+      // ▼ = 小さく（CPL+1）
+      dom.slideCplDown.addEventListener('click',()=>{
+        const i = state.editor.currentSlideIndex; if(i<0) return;
+        const s = state.editor.slides[i]; const base = getEffectiveCpl(s);
+        s.cpl = clamp((typeof s.cpl==='number'? s.cpl : base) + 1, CPL_MIN, CPL_MAX);
+        renderEditor();
+      });
+      dom.slideCplReset.addEventListener('click',()=>{
+        const i = state.editor.currentSlideIndex; if(i<0) return;
+        const s = state.editor.slides[i];
+        delete s.cpl; // デッキ基準に戻す
+        renderEditor();
+      });
+    }
+
     function setupEventListeners(){
       dom.tabEditor.addEventListener('click',()=>handleModeChange('editor'));
       dom.tabViewer.addEventListener('click',()=>handleModeChange('viewer'));
@@ -682,6 +803,9 @@
       dom.viewerPrevArrow.addEventListener('click',()=>handleViewerNav(-1));
       dom.viewerNextArrow.addEventListener('click',()=>handleViewerNav(1));
       dom.viewerBackBtn.addEventListener('click',handleViewerBack);
+
+      setupViewerSizeControls();
+      setupPerSlideSizeControls();
     }
 
     async function main(){ setupEventListeners(); await initializeFirebase(); render(); }
